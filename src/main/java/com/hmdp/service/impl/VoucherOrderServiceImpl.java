@@ -8,8 +8,10 @@ import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
+import com.hmdp.utils.SimpleRedisLock;
 import com.hmdp.utils.UserHolder;
 import org.springframework.aop.framework.AopContext;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,6 +34,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private RedisIdWorker redisIdWorker;
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
     @Override
     public Result seckillVoucher(Long voucherId) {
         //1.查询优惠卷
@@ -53,11 +58,29 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足！");
         }
         Long userId = UserHolder.getUser().getId();
-        // 先获取锁（事务提交之后再去释放锁）这样才能确保线程安全
+        /*// 先获取锁（事务提交之后再去释放锁）这样才能确保线程安全
         synchronized (userId.toString().intern()) {
             // 拿到事务代理的对象才可以 （this拿到的是取当前对象）
             IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy(); // 这样获取当前对象的代理对象
             return Result.ok(proxy.createVoucherOrder(voucherId));
+        }*/
+
+        // 创建锁对象
+        SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+        boolean isLock = lock.tryLock(5L);
+        if (!isLock) {
+            //失败 返回错误或重试
+            return Result.fail("一个人只允许下一单");
+        }
+        try {
+            // 拿到事务代理的对象才可以 （this拿到的是取当前对象）
+            IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy(); // 这样获取当前对象的代理对象
+            return Result.ok(proxy.createVoucherOrder(voucherId));
+        } catch (IllegalStateException e) {
+            throw new RuntimeException(e);
+        } finally {
+            // 释放锁
+            lock.unlock();
         }
     }
 
